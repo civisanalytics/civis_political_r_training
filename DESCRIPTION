@@ -1,4 +1,4 @@
-Package: civis.political.r.training
+Package: civis.political.r.training.dev
 Type: Package
 Title: What the Package Does (Title Case)
 Version: 0.1.0
@@ -9,3 +9,6 @@ Description: More about what it does (maybe more than one line)
 License: What license is it under?
 Encoding: UTF-8
 LazyData: true
+Suggests: knitr,
+    rmarkdown
+VignetteBuilder: knitr
