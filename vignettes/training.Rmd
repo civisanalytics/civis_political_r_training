@@ -1,0 +1,809 @@
+---
+title: 'Civis 2019 Political Community Summit: Session, "Introduction to Data Munging and Visualization in R"'
+author: "Cameron Clarke"
+date: "`r Sys.Date()`"
+output: 
+  rmarkdown::html_vignette:
+    fig_height: 7.2
+    fig_width: 7.2
+vignette: >
+  %\VignetteIndexEntry{Civis 2019 Political Community Summit: Session, Introduction to Data Munging and Visualization in R}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+
+library(tidyverse)
+
+download_url <- 'https://inventory.data.gov/dataset/988dfe28-739a-418c-8bee-47fec76944e0/resource/4499fc97-7ace-4723-a66e-7b477eac2d19/download/userssharedsdfperc18to24yowhonotcomphssre20002013.csv'
+
+mbk_all_data_df <- readr::read_csv(download_url)
+
+cols_with_NAs <- function(df) {
+  return(colnames(df)[colSums(is.na(df)) > 0])
+}
+
+mbk_all_data_df <- mbk_all_data_df %>% 
+  mutate(
+    Percentage = stringr::str_sub(Percentage, start = 1, end = -2),
+    Percentage = as.double(Percentage)
+  )
+
+mbk_all_data_df <- mbk_all_data_df %>% 
+  dplyr::mutate(
+    Sex = tidyr::replace_na(Sex, "All sexes in survey sample")
+  )
+
+mbk_all_data_df <- mbk_all_data_df %>% 
+  dplyr::mutate(
+    `Race/ethnicity` = tidyr::replace_na(`Race/ethnicity`, "All racial and ethnic groups in survey sample")
+  )
+
+mbk_all_data_df <- mbk_all_data_df %>% 
+  dplyr::select(-Characteristic)
+
+group_data_is_missing <- mbk_all_data_df %>%
+  dplyr::group_by(Sex, `Race/ethnicity`) %>% 
+  dplyr::summarize(has_relevant_NAs = any(is.na(Percentage) | is.na(`Standard Error on Percentage`))) %>% 
+  dplyr::select(Sex, `Race/ethnicity`, has_relevant_NAs) %>% 
+  dplyr::ungroup()
+
+mbk_all_data_df <- dplyr::inner_join(mbk_all_data_df, group_data_is_missing,
+                                     by = c("Sex", "Race/ethnicity"))
+
+mbk_all_data_df <- mbk_all_data_df  %>% 
+  dplyr::mutate(
+    race_ethnicity_plot_label = stringr::str_replace_all(`Race/ethnicity`, ' - ', ' -\n'),
+    race_ethnicity_plot_label = stringr::str_replace_all(race_ethnicity_plot_label, ', ', ',\n'),
+    race_ethnicity_plot_label = stringr::str_replace_all(race_ethnicity_plot_label, '/', '/\n'),
+    race_ethnicity_plot_label = case_when(`Race/ethnicity` == "All racial and ethnic groups in survey sample" ~ "All racial and\nethnic groups in\nsurvey sample",
+                                          TRUE ~ race_ethnicity_plot_label),
+    sex_plot_label = case_when(Sex == "All sexes in survey sample" ~ "All sexes in\nsurvey sample", TRUE ~ Sex)
+  ) 
+
+mbk_all_data_df <- mbk_all_data_df %>%
+  transmute(
+    sex = Sex,
+    race_ethnicity = `Race/ethnicity`,
+    sex_plot_label = sex_plot_label,
+    race_ethnicity_plot_label = race_ethnicity_plot_label,
+    year = Year,
+    percentage_estimate = Percentage,
+    percentage_stderr_estimate = `Standard Error on Percentage`,
+    note_on_percentage = `Note on Percentage`,
+    count_estimate = `Count (in thousands)` * 1000,
+    count_stderr_estimate = `Standard Error on Count (in thousands)` * 1000,
+    note_on_count = `Note on Count`,
+    has_relevant_NAs = has_relevant_NAs
+  )
+
+full_data_df <- mbk_all_data_df %>% 
+  dplyr::filter(has_relevant_NAs == FALSE)
+```
+
+# 0. Preface
+
+Welcome! In this session we'll discuss data munging and visualization in R, using open and publicly-available data coming from the [Current Population Survey](https://www.census.gov/programs-surveys/cps.html) and [reported by the U.S. Department of Education and the My Brother's Keeper Initiative](https://www2.ed.gov/rschstat/statistics/surveys/mbk/index.html). We'll aim to make the following visualization of this dataset: 
+
+```{r, echo=FALSE}
+ggplot2::ggplot(data = full_data_df) +
+  ggplot2::geom_line(mapping = aes(x = year, y = percentage_estimate)) +
+  ggplot2::facet_grid(sex_plot_label ~ race_ethnicity_plot_label) +
+  ggplot2::xlab("Year") +
+  ggplot2::ylab("Estimated high school\nnon-completion percentage\n(in percentage points)") +
+  ggplot2::labs(title = "Estimated High School Non-Completion Percentage\namong 18- to 24-year-olds",
+                subtitle = "By sex, race/ethnicity, and year, 2000-2013",
+                caption = "Source: Aggregates of Current Population Survey (CPS) statistics reported by the My Brother's Keeper\n(MBK) Key Statistical Indicators on Boys and Men of Color initiative; available from data.gov.\nNOTE: data indicated by MBK to be statistically unreliable is not included in this plot")
+```
+
+We'll work our way up to constructing this visualization incrementally. First, to orient ourselves, we'll go through some parts of the [R programming lanugage](https://www.r-project.org/) that will be foundational for the data munging and visualization work we'll do. Then we'll get to know the particular dataset we'll be visualizing, and go through the data munging steps needed to get it to plot-ready form. Here we'll make use of the [`tidyverse`](https://www.tidyverse.org/) set of R packages, a useful and popular set of tools designed specifically for data science. We'll finish off with a tour of some of the main parts of [`ggplot2`](https://ggplot2.tidyverse.org/), a package and framework for doing data visualizations in R that's part of the `tidyverse` set of tools. We'll work our way up to building the visualization shown above, highlighting some of the flexibility that the `ggplot2` allows in buiding plots layer by layer.
+
+
+
+# 1. A Brief Introduction to R Programming
+
+## 1.1 Assignment, packages, functions
+
+Below, we're going to make use of the R language. Here are some specific parts we'll use
+
+* `<-`: this is the primary [_assignment operator_](https://stat.ethz.ch/R-manual/R-devel/library/base/html/assignOps.html) in R. We use `<-` to assign a _value_ to a _name_. For example, `r x <- 3` `x <- 3` assigns the value `r x` to `x`. Then, whenever we call `x`, we'll get `r x` in its place:
+```{r}
+x <- 3
+x
+```
+* The syntax [`<PACKAGE>::<FUNCTION>`](https://stat.ethz.ch/R-manual/R-devel/library/base/html/ns-dblcolon.html) (e.g., `dplyr::mutate()`) allows us to call a specific function from an R package that it may be a part of. Not all functions are part of a package; for example, functions you define directly from your RStudio interactive prompt will not immediately be part of a package. But, a main way that R tends to grow as a language is through innovations in packages, and so it is very common to encounter them when programming with R. (For more on packages, see Hadley Wickham's book ["R Packages"](http://r-pkgs.had.co.nz/).) 
+  * A note here: it is not strictly necessary to specify a package name every time you want to use a function from that package. If you first call the [`library()`](https://stat.ethz.ch/R-manual/R-devel/library/base/html/library.html) function—e.g., `library(tidyverse)`—all functions from the specified package's _namespace_ will be _attached_ on the search path that R uses when trying to parse user input—and so you won't need to use the double-colon syntax to call functions from `tidyverse` (e.g., you could just call `mutate()`).
+* In R it is possible to [define your own functions](https://r4ds.had.co.nz/functions.html). A function is basically an instruction, or a set of instructions, that is given a name. In this sense, functions are a kind of _value_; and not coincidentally, we use the assignment operator to give functions their names.
+* `%>%`: this is the [_pipe operator_](https://r4ds.had.co.nz/pipes.html). The core motivation behind the pipe operator is to allow us to write code that is easier to read. It lets us chain together instructions (especially functions) in our code by letting us "pipe" the output of one function into another function as that latter function's input. 
+
+
+## 1.2 Examples
+
+Let's look at some examples of these language constructs described above. First, let's define a function called `myfunc` which takes in two arguments concatenates them with a separator (here, a comma and a space) in between, and returns the resulting character string:
+
+```{r cell-1}
+# `myfunc`: 
+#   - input:  arg_1, arg_2 (must both be able to be cast as 
+#             character strings)
+#   - output: the concatenation of arg_1 and arg_2 as characters, 
+#             with a comma and a space as a separator
+myfunc <- function(arg_1, arg_2) {
+  
+  output <- paste0(arg_1, ", ", arg_2)
+  
+  return(output)
+  
+}
+```
+
+
+Combining some of the above information:
+
+```{r cell-2}
+myfunc(arg_1 = "a", arg_2 = "b")
+```
+
+```{r cell-3}
+myfunc("a", "b")
+```
+
+```{r cell-4}
+myfunc("b", "a")
+```
+```{r cell-5, error=TRUE}
+myfunc("b", a)
+```
+
+
+```{r cell-6}
+myvar <- myfunc("a", "b")
+myvar
+```
+
+```{r cell-7}
+myvar_2 <- "a" %>% myfunc("b")
+myvar_2
+```
+
+```{r cell-8}
+myvar_3 <- "b" %>% myfunc("a")
+myvar_3
+```
+
+```{r cell-9}
+myvar_4 <- "b" %>% myfunc("a", .)
+myvar_4
+```
+
+```{r cell-10}
+myvar_5 <- "b" %>% myfunc(arg_1 = "a", arg_2 = .)
+myvar_5
+```
+
+We'll make use of all of these R langauge constructs througout the workshop.
+
+
+
+# 2. Munging the data
+
+Many data analysis tasks include the up-front work of transforming the data from its raw from into a form that is more suited for analysis. In this section we'll walk through the process of munging our dataset of interest.
+
+## 2.1 Loading in the data
+
+First, we'll load in the data. The data we'll use comes from from the [Current Population Survey (CPS)](https://catalog.data.gov/dataset/current-population-survey), and is [reported by the U.S. Department of Education and the My Brother's Keeper Key (MBK) Statistical Indicators on Boys and Men of Color initiative](https://www2.ed.gov/rschstat/statistics/surveys/mbk/index.html).
+
+The original source for the data is [here](https://catalog.data.gov/dataset/my-brothers-keeper-key-statistical-indicators-on-boys-and-men-of-color/resource/c0bd373a-0ca0-41af-85e8-47e4ae8ff1a7), and the description of the data given at that source is the foollowing:
+> Percentage of 18- to 24-year-olds who have not completed high school by sex and race/ethnicity, 2000-2013
+
+So this dataset is likely a pre-aggregated version of the CPS data. (For more information on the CPS itself, including its questionnaire and methodology, see here: https://www.census.gov/programs-surveys/cps.html)
+
+Let's go ahead and read in the dataset from the download link given on the original source page. Here, we'll use the `readr::read_csv()` function found in the [`readr` package](https://readr.tidyverse.org/). First we'll define a variable that contains the download URL as a string:
+
+```{r}
+download_url <- 'https://inventory.data.gov/dataset/988dfe28-739a-418c-8bee-47fec76944e0/resource/4499fc97-7ace-4723-a66e-7b477eac2d19/download/userssharedsdfperc18to24yowhonotcomphssre20002013.csv'
+```
+
+Then we'll go ahead and read in the data directly from that URL, and assign the result to a name called `mbk_all_data_df`:
+
+```{r}
+mbk_all_data_df <- readr::read_csv(download_url)
+```
+
+Note the *column specification* indicated by the output of our call to `readr::read_csv()`: these column specifications tell you what types the resulting columns will be. (Often, it's a good idea to specify these types explicitly, but we don't do so in this case; see [here](https://r4ds.had.co.nz/data-import.html#parsing-a-file) for more information about what this would look like.) 
+
+Let's look through the dataset to get a sense for it in its raw form:
+
+```{r}
+mbk_all_data_df
+```
+
+(If you're following along and have the data loaded into your RStudio session, try typing `View(mbk_all_data_df)` into your RStudio console for a more user-friendly view of the data.)
+
+Looking through the above table, we can see if there's anything we notice (column names, number of rows, number of columns, the range of values in each column, missing values, etc.).
+
+There are some things which will frame our analysis and which we can notice right away:
+
+* For the purposes of analysis, we might think of the `sex`, `race_ethnicity`, and `year` columns as together defining the relevant _subgroups_ of our data.
+* The `sex` and `race_ethnicity` columns each follow a classificatory scheme that is inadequate in important ways. (These schemes have their basis in the way that demographic information is asked about, or collected otherwise, on the CPS.)
+* Each choice of values for these three variables that define the relevant subgroups is "related" to a specific value of `percentage_estimate` and `percentage_stderr_estimate`.
+
+## 2.2 Checking for Missing Data
+
+One other thing thing we can note about our dataset is that it has many *missing* values in it's raw form (note all the `NA` values). This missingness might affect the kinds of visualizations we can later make, so we'll try to get a sense for it up front.
+
+Firstly, let's define a function that lets us find all the columns that have missing values (making use of [this very helpful Stack Overflow post](https://stackoverflow.com/questions/20364450/find-names-of-columns-which-contain-missing-values)):
+
+```{r cell-13}
+
+cols_with_NAs <- function(df) {
+  return(colnames(df)[colSums(is.na(df)) > 0])
+}
+
+```
+
+Now, let's use this function to find the names of all columns that have missing values.
+
+```{r cell-14}
+cols_with_NAs(mbk_all_data_df)
+```
+
+So it looks like most of the colums in our dataset have missing values (all of them do except for the `Characteristic` column). But, things might be missing in different places for different reasons, as we'll consider below.
+
+## 2.3 Cleaning the data
+
+We'll now begin the significant task of cleaning our data before we get to plotting it. We'll think about how we might want to handle each of the columns in the dataset in turn.
+
+#### `Percentage`
+Looking back at the column specification indicated by our `readr::read_csv()` call we can see that `readr::read_csv()` read in `Percentage` as a _character_ column. We'll want to have it as a _numeric_ type when it comes time for plotting, though. We can make this transformation as follows, using the [dplyr::mutate() function](https://r4ds.had.co.nz/transform.html#add-new-variables-with-mutate) to "mutate" the `Percentage` column of the data and change it into the form we want. First, we'll mutate the data so that we grab only the numeric parts of the string:
+
+```{r cell-15}
+mbk_all_data_df <- mbk_all_data_df %>% 
+  dplyr::mutate(Percentage = stringr::str_sub(Percentage, start = 1, end = -2))
+```
+
+And now we'll cast that numeric string as a `double` (short for "double-precision floating point number") type:
+
+```{r}
+mbk_all_data_df <- mbk_all_data_df %>% 
+  dplyr::mutate(Percentage = as.double(Percentage))
+```
+
+Now the `Percentage` column is in the form we want for the plots we'll eventually build.
+
+
+#### `Sex`
+
+For the `Sex` column, one of the things we want to check about it are its unique values. Here, we'll make use of the [`dplyr::select()`](https://r4ds.had.co.nz/transform.html#select) function, and another function, [`unique()`](https://stat.ethz.ch/R-manual/R-devel/library/base/html/unique.html) (a standard, or "base" R function), that we can use to give us back the unique values of the column: 
+
+```{r cell-16}
+mbk_all_data_df %>% 
+  dplyr::select(Sex) %>% 
+  unique()
+```
+
+So we see that the `Sex` column takes on three values in our dataset: `Female`, `Male`, and `NA`. What's going on with the `NA` cases? To try to figure out, we can use the [`dplyr::filter()` function](https://r4ds.had.co.nz/transform.html#filter-rows-with-filter), along with the [`is.na()`](https://stat.ethz.ch/R-manual/R-devel/library/base/html/NA.html) function (which tells us whether or not a value is null, row-by-row):
+
+```{r cell-17}
+mbk_all_data_df %>% 
+  dplyr::filter(is.na(Sex))
+```
+
+Tabbing through, we can see that the only values for the `Characteristic` column that remain are "Total" and "Total - <some value of the Race/ethnicity column>". These values correspond to rows whose information is not broken out by `Sex` column—in other words, those rows that include statistics about both "Female" and "Male" groups combined, specific to each `Race/ethnicity` group. Because of this, one way we might think to recode the `NA` values in for these records is to impute the value "All sexes in survey sample". We'll do so using the [dplyr::mutate() function](https://r4ds.had.co.nz/transform.html#add-new-variables-with-mutate) and the [tidyr::replace_na() function](https://tidyr.tidyverse.org/reference/replace_na.html):
+
+```{r cell-18}
+mbk_all_data_df <- mbk_all_data_df %>% 
+  dplyr::mutate(
+    Sex = tidyr::replace_na(Sex, "All sexes in survey sample")
+  )
+```
+
+What are we left with now? We can see that the `Sex` column no longer has `NA` values: 
+```{r cell-19}
+"Sex" %in% cols_with_NAs(mbk_all_data_df)
+```
+
+...and that we get the same set of rows back when we filter to `Sex == "All sexes in survey sample"` as we did before when we filtered to `is.na(Sex)`:
+
+```{r cell-20}
+mbk_all_data_df %>% 
+  dplyr::filter(Sex == "All sexes in survey sample")
+```
+
+#### `Race/ethnicity`
+
+An analysis for missing values of the `Race/ethnicity` column would go similarly to the above analysis of missing values of the `Sex` column for this particular dataset. For brevity, we skip that analysis here and do a similar transformation of the data:
+
+```{r cell-21}
+mbk_all_data_df <- mbk_all_data_df %>% 
+  dplyr::mutate(
+    `Race/ethnicity` = tidyr::replace_na(`Race/ethnicity`, "All racial and ethnic groups in survey sample")
+  )
+```
+
+#### `Characteristic`
+
+With full data now present in both the `Sex` and `Race/ethnicity` columns, we can get rid of the `Characteristic` column, which contains the same information. We'll see later that for plotting, especially [_faceting_](https://r4ds.had.co.nz/data-visualisation.html#facets), having this information separated into two columns will be helpful.
+
+We'll get rid of the `Characteristic` column with the [`dplyr::select()` function](https://r4ds.had.co.nz/transform.html#select), as well as the `-` (minus) operator. What the command below basically says is "select all columns from `mbk_all_data_df` *except* (hence the minus sign) the `Characteristic` column, and assign the same name (`mbk_all_data_df`) back to the result":
+
+```{r cell-22}
+mbk_all_data_df <- mbk_all_data_df %>% 
+  dplyr::select(-Characteristic)
+```
+
+Looking at `mbk_all_data_df`, we see that there's no longer a `Characteristic` column present:
+
+```{r cell-23}
+mbk_all_data_df
+```
+
+
+Okay—let's pause for a second and see what are data look like now in terms of missingness:
+
+```{r cell-24}
+cols_with_NAs(mbk_all_data_df)
+```
+
+So, we're closer. But let's investigate the further missingness.
+
+#### `Percentage`
+
+Let's see if we can deduce what's happening when the `Percentage` measurement is missing. This is a value that's going to be crucial for our visualizations, so we'll want to figure it out up front if possible.
+Let's again use the `dplyr::filter()` and `is.na()` functions we encountered above: 
+
+```{r cell-25}
+mbk_all_data_df %>% 
+  dplyr::filter(is.na(Percentage))
+```
+
+Let's try _sorting_ the rows of the dataset to see if we can see any kind of patterns that emerge in the missingness of `Percentage`. To do so, we'll use the [`dplyr::arrange()` function](https://r4ds.had.co.nz/transform.html#arrange-rows-with-arrange). Below, we use `dplyr::arrange()` to sort (in ascending alphabetical or numeric order, depending on the data type of the column) first by `Race/ethnicity`, then by `Sex`, and finally by `Year`:
+
+```{r cell-26}
+mbk_all_data_df %>% 
+  dplyr::filter(is.na(Percentage)) %>% 
+  dplyr::arrange(`Race/ethnicity`, Sex, Year)
+```
+
+We can see that there _is_ some regularity to the missingness here: things are missing only in rows that have a `Race/ethnicity` value of "Pacific Islander, non-Hispanic" or "Two or more races, non-Hispanic". We can also note that there are _some_ cases where we have data for "Pacific Islander, non-Hispanic" and "Two or more races, non-Hispanic" rows; it's only for certain `Year` values that we'll have missing data for these groups.
+
+This is an exmaple where missingness might have some reason other than just a data coding convention of the kind we saw for missingness about the `Sex` and `Race/ethnicity` columns. Here, we're actually given notes: in the `Note on Percentage` column: either data was not available, or reporting standards were not met. We're not going to do anything about this missingness immediately, but we'll pay attention to it again when we get to actually plotting things.
+
+Let's pivot to looking more closely at the `Note on Percentage` column. Above, we considered it in the context of rows where the `Percentage` value is missing. But do we have any notes for rows where we have full `Percentage` data? Let's ask our dataset. Here, we'll use the very same functions as above, except we'll put a [`!` (the logical negation operator in R, often pronounced "bang")](https://stat.ethz.ch/R-manual/R-devel/library/base/html/Logic.html) in front of our call to `is.na(Percentage)`, and add the condition ``!is.na(`Note on Percentage`)`` to our filter to get rows where neither `Percentage` nor `Note on Percentage` is missing: 
+
+```{r cell-27}
+mbk_all_data_df %>% 
+  dplyr::filter(!is.na(Percentage), !is.na(`Note on Percentage`)) %>% 
+  dplyr::arrange(`Race/ethnicity`, Sex, Year) %>% 
+  dplyr::select(`Race/ethnicity`, Sex, Year, `Note on Percentage`)
+```
+
+So it looks like this data source does not have _reliable_ information about the "Pacific Islander, non-Hispanic" group in lots of years, even though there's a value reported. This will be something we'll want to note (as a caption, subtitle, or something else) if we end up using these data for visualization.
+
+Given the missingness and notes on statistical validity we're seeing for some of the values we're thinking of plotting, for some of the subgroups in our dataset, we'll proceed by separating our data into two mutually exclusive datasets:
+
+* `missing_data_df`: a data set where we have missing data for some cases 
+* `full_data_df`: a data set where we have full data for all cases
+
+This will require a couple steps. 
+
+First, we'll step back and take a slightly different view on our data. Eventually, the visualizations we're going to talk about will (in the ideal) incorporate both the `Percentage` and `Standard Error on Percentage` columns. So, we want to distinguish between subgroups (defined, for the time being, by the intersection of `Sex` and `Race/ethnicity`) of our dataset that have both `Percentage` and `Standard Error on Percentage` information for all years in question, and those for which we this information is not all present.
+
+To accomplish this, we'll use two new functions: [`dplyr::group_by()`](https://dplyr.tidyverse.org/reference/group_by.html) and [`dplyr::summarize()`](https://dplyr.tidyverse.org/reference/summarise.html). `dplyr::group_by()` will set our data up so that we can do operations on entire groups of our data at a time, and `dplyr::summarize()` will allow us to compute _summaries_ (think here of "summary statistics" like mean, median, variance, etc.) of each group of our data.
+
+We do the following:
+
+```{r cell-28}
+group_data_is_missing <- mbk_all_data_df %>%
+  dplyr::group_by(Sex, `Race/ethnicity`) %>% 
+  dplyr::summarize(has_relevant_NAs = any(is.na(Percentage) | is.na(`Standard Error on Percentage`))) %>% 
+  dplyr::select(Sex, `Race/ethnicity`, has_relevant_NAs) %>% 
+  dplyr::ungroup()
+```
+
+What's the result? Let's look:
+
+```{r cell-29}
+group_data_is_missing
+```
+
+Basically, what we now have is a filter condition for each `Sex`/`Race/ethnicity` group in our dataset. We can use this to construct the two datasets that we want. First, though, we'll need to [_join_](https://r4ds.had.co.nz/relational-data.html#understanding-joins) this new table back to `mbk_all_data_df`. We'll use `dplyr::inner_join()` to connect these two datasets. Below, we'll tell the `dplyr::inner_join()` function to look for cases where the values of both the `Sex` and the `Race/ethnicity` values match up in both tables, and associate the value of `has_relevant_NAs` accordingly:
+
+```{r cell-30}
+mbk_all_data_df <- dplyr::inner_join(mbk_all_data_df, group_data_is_missing,
+                                      by = c("Sex", "Race/ethnicity"))
+```
+
+We now have all we need in place to do a straightforward filter of our dataset to get the `missing_data_df` and `full_data_df` tables we want.
+
+```{r cell-31}
+# remove this cell
+missing_data_df <- mbk_all_data_df %>% 
+  dplyr::filter(has_relevant_NAs == TRUE)
+
+full_data_df <- mbk_all_data_df %>% 
+  dplyr::filter(has_relevant_NAs == FALSE)
+```
+
+Let's see what we're now left with:
+
+```{r cell-32}
+full_data_df
+```
+
+```{r cell-33}
+missing_data_df
+```
+
+There's one more set of steps we'll take to get the data in `full_data_df` to show up nicer and behave in a more user-friendly way when we go to work with it for plotting:
+```{r}
+full_data_df <- full_data_df  %>% 
+  dplyr::mutate(
+    race_ethnicity_plot_label = stringr::str_replace_all(`Race/ethnicity`, ' - ', ' -\n'),
+    race_ethnicity_plot_label = stringr::str_replace_all(race_ethnicity_plot_label, ', ', ',\n'),
+    race_ethnicity_plot_label = stringr::str_replace_all(race_ethnicity_plot_label, '/', '/\n'),
+    race_ethnicity_plot_label = case_when(`Race/ethnicity` == "All racial and ethnic groups in survey sample" ~ "All racial and\nethnic groups in\nsurvey sample", TRUE ~ race_ethnicity_plot_label),
+    sex_plot_label = case_when(Sex == "All sexes in survey sample" ~ "All sexes in\nsurvey sample", TRUE ~ Sex)
+  ) 
+
+# make column names of full_data_df all syntactic:
+# (for more about (non-)syntactic names, see 
+#  https://adv-r.hadley.nz/names-values.html#non-syntactic)
+full_data_df <- full_data_df %>%
+  dplyr::transmute( # note here we're using transmute() instead of mutate()
+    sex = Sex,
+    race_ethnicity = `Race/ethnicity`,
+    sex_plot_label = sex_plot_label,
+    race_ethnicity_plot_label = race_ethnicity_plot_label,
+    year = Year,
+    percentage_estimate = Percentage,
+    percentage_stderr_estimate = `Standard Error on Percentage`,
+    note_on_percentage = `Note on Percentage`,
+    count_estimate = `Count (in thousands)` * 1000,
+    count_stderr_estimate = `Standard Error on Count (in thousands)` * 1000,
+    note_on_count = `Note on Count`,
+    has_relevant_NAs = has_relevant_NAs
+  )
+```
+
+A note before moving on: There is some pre-processing that we've done to separate out subgroups of the data for which we have all of the relevant data for plotting, and subgroups for which we are missing some of that data. Taking a look at `missing_data_df` we see that data specifically related to the `Race/ethnicity` subgroups "Pacific Islander, non-Hispanic" and "Two or more races, non-Hispanic" have many missing values in the `Percentage` column.
+
+For a truly complete and representative analysis, we'd look to fill this missing data through supplemental data sources. We have not done that work here, but want to point to sources like the datasets found at the [Asian American, Native Hawaiian, and Pacific Islander Dataset Repository](http://aapidata.com/repository/). We recognize that this non-representativeness of the dataset we use and the failure to fully incorporate data available from other sources is a limitation on the analysis we present here.
+
+With the data cleaning work we've done above, visualization is a more straigtforward task.
+
+# 3. Visualizing the data
+
+There are a couple main things we'll aim to work through in this section:
+
+* A first pass at a `ggplot2` object
+* Aesthetic mappings
+* Faceting
+* Geometric objects
+* Visualizing uncertainty
+* Statistical transformations
+* Position adjustments
+* Coordinate systems
+* Titles and labels
+
+As a note, before we begin: the presentation of this material is largely inspired [the data visualization section](https://r4ds.had.co.nz/data-visualisation.html) of the book [_R for Data Science_](https://r4ds.had.co.nz/) by Garrett Grolemund and Hadley Wickham. We _highly_ recommend working through that book if the tools you see here are ones you'd like to know more about; that book is a canonical resource for these tools.
+
+## 3.1 A first pass at a `ggplot2` object
+
+To get intuitions going, let's take a look at the following visualization:
+
+```{r cell-34}
+ggplot2::ggplot(data = full_data_df) +
+  ggplot2::geom_point(aes(x = year, y = percentage_estimate)) +
+  ggplot2::facet_wrap(race_ethnicity ~ sex)
+  
+```
+
+There are lots of things to note about this initial visualization, which we'll discuss more below. What are some that stand out to you?
+
+## 3.2 Aesthetic mappings
+
+Technically speaking, the only call we need to make to get a ggplot object is the [`ggplot2::ggplot() function`](https://ggplot2.tidyverse.org/reference/ggplot.html). This function initializes a ggplot object. Let's see what we get by calling that function:
+
+```{r}
+ggplot2::ggplot()
+```
+
+Without any further instruction, the `ggplot2::ggplot()` function gives us a skeleton of a ggplot object.
+
+`ggplot2` works by [building up plots in _layers_](https://r4ds.had.co.nz/data-visualisation.html#the-layered-grammar-of-graphics). To stack together these layers, we use the `+` operator. (This use of the `+` operator is specific to `ggplot2`.)
+
+The first kind of layers we'll encounter are _aesthetic mappings_. An aesthetic mapping is happening whevever you see the `aes()` function. Theese mappings are how we tell `ggplot2` what information in our dataset to actually display, and where on the plot to display it.
+
+In code, the basic setup (cited from [here](https://r4ds.had.co.nz/data-visualisation.html#first-steps)) of this aesthetic mapping is:
+```{r cell-36, eval=FALSE}
+ggplot2::ggplot(data = <DATA>) + 
+  <GEOM_FUNCTION>(mapping = aes(<MAPPINGS>))
+```
+
+Breaking this down a little bit:
+
+* The `<DATA>` value is the dataset that has the information we want to visulalize. 
+  + In the above example, this was `full_data_df`. 
+* The `<GEOM_FUNCTION>` value is a function that tells `ggplot2` exactly what kind of visualization we want (points/dots? bars? lines?). 
+  + In the above example we used `ggplot2::geom_point()`, which tells our plot to render the information as points. 
+* The `<MAPPINGS>` value tells `ggplot2` which columns of that dataset to use for visualization, and how to _map_ those columns to the plot itself.   + Above, we included the instruction `aes(x = year, y = Percentage)`, saying that the `year` column of `full_data_df` was to be mapped to the `x` axis of the plot, and that the `percentage` of `full_data_df` was to be mapped to the `y` axis of the plot. 
+
+(In the first plot, we also included an instruction to _facet_ our plot into sub-plots, instead of showing everything on one big plot; more on that later.)
+
+As an example, let's plot the examples in our dataset classified as having a `race_ethnicity` value of "Black, non-Hispanic" over time (e.g., `year`), ignoring for now the breakouts that exist for this group by `sex` in our dataset.
+
+```{r cell-37}
+non_hisp_black_df <- full_data_df %>% 
+  dplyr::filter(race_ethnicity == "Black, non-Hispanic")
+
+ggplot2::ggplot(data = non_hisp_black_df) +
+  ggplot2::geom_point(mapping = aes(x = year, y = percentage_estimate))
+```
+
+This plot is a little hard to interpret on its own; we can infer an overall downward trend over time in the estimated percentage of people classified as "Black, non-Hispanic" aged 18-24 in the US who do not graduate high school, but otherwise it's hard to discern much.
+
+Visually, part of this confusion might be due to the fact that we're using points as opposed to another kind of `geom_` function... Let's try making a line plot using the `ggplot2::geom_line` function:
+
+```{r cell-38}
+ggplot2::ggplot(data = non_hisp_black_df) +
+  ggplot2::geom_line(mapping = aes(x = year, y = percentage_estimate))
+```
+
+This arguably looks even more strange! What could be going on...
+
+...as we know, our dataset has a subgrouping of its records beyond the `race_ethnicity` column: there is also the `sex` column. With this in mind, we realize that what's being plotted above is data from all three groups of the `sex` column at once, but that `ggplot2` can't detect that there's a further relevant subgrouping on its own. 
+
+There are a couple ways to proceed here. One way is to think to try to add some distiguishing features for points associated with each of the three unique values ("Female", "Male", "All sexes in survey sample") of our `sex` column, specific to each of those values. We might think to try the _shape_ of the points:
+
+```{r cell-39}
+ggplot2::ggplot(data = non_hisp_black_df) +
+  ggplot2::geom_point(mapping = aes(x = year, y = percentage_estimate, shape = sex))
+```
+
+By now passing the `shape = sex` instruction to our `aes()` call, we get a different shaped point for each level of the `Sex` variable, and also a _legend_ on the right side of the plot. 
+
+Maybe these points are still a little hard to distinguish, though. We can also group the points by _color_, by passing `shape = sex` instead of `color = sex`:
+
+```{r cell-40}
+ggplot2::ggplot(data = non_hisp_black_df) +
+  ggplot2::geom_point(mapping = aes(x = year, y = percentage_estimate, color = sex))
+```
+
+This might be a little clearer. We might think things would be even clearer, though, if we could use lines instead of points.
+
+Luckily, passing in `color = sex` not only explicitly colors by level of the `sex` column, but also _groups_ that data under the hood so that rows in our data that share a value of `sex` are grouped together.
+
+To see what we mean, let's go back to using `ggplot::geom_line()`:
+
+```{r cell-41}
+ggplot2::ggplot(data = non_hisp_black_df) +
+  ggplot2::geom_line(mapping = aes(x = year, y = percentage_estimate, color = sex))
+```
+
+This seems like a more suitable way to show our data in a more disaggregated way. Let's consider another way.
+
+## 3.3 Faceting
+
+[Faceting](https://r4ds.had.co.nz/data-visualisation.html#facets) will allow us to show the same information as above, except will give an automatic way to show things on _separate_ plots as opposed to the same plot.
+
+Above, we started with:
+
+```{r cell-42}
+ggplot2::ggplot(data = non_hisp_black_df) +
+  ggplot2::geom_line(mapping = aes(x = year, y = percentage_estimate))
+```
+
+
+Let's see what happens if we add a call to the `ggplot2::facet_wrap()` function:
+
+```{r cell-43}
+ggplot2::ggplot(data = non_hisp_black_df) +
+  ggplot2::geom_line(mapping = aes(x = year, y = percentage_estimate)) +
+  ggplot2::facet_wrap(~ sex)
+```
+
+This call to `ggplot2::facet_wrap()` took as its argument a [_formula_ data structure](https://stat.ethz.ch/R-manual/R-devel/library/stats/html/formula.html), which is created with the `~` character. By default, the plots are listed as separate _columns_ in the plot. Instead of this, we could specify that we want there to be only _one_ column:
+
+```{r cell-44}
+ggplot2::ggplot(data = non_hisp_black_df) +
+  ggplot2::geom_line(mapping = aes(x = year, y = percentage_estimate)) +
+  ggplot2::facet_wrap(~ sex, ncol = 1)
+```
+
+Depending on the task, this might be a more appropriate way to visualize the data.
+
+We might also want to be more explicit about which race/ethnicity group is being plotted on the body of the plot itsef. A closely related function to `ggplot2::facet_wrap()` that does this, but with slightly nicer default display options, is `ggplot2::facet_grid()`. (`facet_wrap()` and `facet_grid()` are similar, but they do differ in how they handle subgroups/intersections with _no_ data in them. For more on this, see [a helpful Stack Overflow post](https://stackoverflow.com/questions/20457905/whats-the-difference-between-facet-wrap-and-facet-grid-in-ggplot2).
+
+We use a _two-sided formula_ as the argument of `ggplot2::facet_grid()`:
+
+```{r cell-45}
+ggplot2::ggplot(data = non_hisp_black_df) +
+  ggplot2::geom_line(mapping = aes(x = year, y = percentage_estimate)) +
+  ggplot2::facet_grid(race_ethnicity_plot_label ~ sex)
+```
+
+What this call to `ggplot2::facet_grid()` with a two-sided formula does in context is to make it more explicit that we are breaking down our data into `sex`/`race_ethnicity` subgroups. We can also flip the direction, putting the `race_ethnicity` category on top and the `sex` categories on the side:
+
+```{r cell-46}
+ggplot2::ggplot(data = non_hisp_black_df) +
+  ggplot2::geom_line(mapping = aes(x = year, y = percentage_estimate)) +
+  ggplot2::facet_grid(sex ~ race_ethnicity_plot_label)
+```
+
+
+We can even do this on the larger `full_data_df` dataset:
+
+```{r cell-47}
+ggplot2::ggplot(data = full_data_df) +
+  ggplot2::geom_line(mapping = aes(x = year, y = percentage_estimate)) +
+  ggplot2::facet_grid(sex_plot_label ~ race_ethnicity_plot_label)
+```
+
+Note that we'll still want to play around with how the labels end up being rendered on our plot; this is something we'll get to later.
+
+## 3.4 Geometric objects
+
+We saw two kinds of _geometric objects_ above: `ggplot2::geom_line()` and `ggplot2::geom_point()`. Another kind of geometric object we might want to use is `ggplot2::geom_bar()`, to (for example) make a comparison of a given `sex` group's trends in high school drop out rate by `race_ethnicity`. Let's look at this for the year 2008:
+
+```{r cell-48}
+df_for_bars <- full_data_df %>% 
+  dplyr::filter(year == 2008, sex == 'All sexes in survey sample')
+
+ggplot2::ggplot(data = df_for_bars) +
+  ggplot2::geom_bar(mapping = aes(x = race_ethnicity_plot_label, y = percentage_estimate), stat = 'identity')
+
+```
+
+
+We can even combine this with a faceting instruction:
+
+
+```{r cell-49}
+all_sexes_df <- full_data_df %>% 
+  dplyr::filter(sex == 'All sexes in survey sample')
+
+ggplot2::ggplot(data = all_sexes_df) +
+  ggplot2::geom_bar(mapping = aes(x = race_ethnicity_plot_label, y = percentage_estimate), stat = 'identity') +
+  ggplot2::facet_wrap(~ year)
+```
+
+
+### 3.4.1 Visualizing uncertainty
+
+Another geometric mapping that's especially helpful for plotting _uncertainty_ is [`ggplot2::geom_ribbon()`](https://ggplot2.tidyverse.org/reference/geom_ribbon.html), which fills in an interval (a "ribbon") within some given bounds. Again using `non_hisp_black_df`, for example, we might see:
+
+```{r cell-50}
+ggplot2::ggplot(data = non_hisp_black_df) +
+  ggplot2::geom_line(mapping = aes(x = year, y = percentage_estimate, color = sex)) +
+  ggplot2::geom_ribbon(mapping = aes(x = year, 
+                                     ymin = percentage_estimate - percentage_stderr_estimate,
+                                     ymax = percentage_estimate + percentage_stderr_estimate,
+                                     fill = sex,
+                                     alpha = 0.3))
+```
+
+Here, we encounter two new possible arguments for the `aes()` function: `fill` (which controls what color `geom_ribbon()` uses to "fill" the area it defines) and `alpha` (which defines the transparency of the fill color).
+
+Since we're now in the domain of using _more than one geometric object on the same plot_, we might think that we want these geometric objects to share (some of) the same aesthetic mappings. To do this, we can move the shared aesthetic mappings up to the original call of the `ggplot2::ggplot()` function as follows:
+
+```{r cell-51}
+ggplot2::ggplot(
+  data = non_hisp_black_df, 
+  mapping = aes(x = year,
+                y = percentage_estimate,
+                ymin = percentage_estimate - percentage_stderr_estimate,
+                ymax = percentage_estimate + percentage_stderr_estimate)
+  ) +
+  ggplot2::geom_line(aes(color = sex)) +
+  ggplot2::geom_ribbon(aes(fill = sex, alpha = 0.3))
+```
+
+
+Below we'll briefly cover a few more slightly advanced topics:
+
+## 3.5 Statistical transformations
+
+Notice that in our original call to make bar plots...
+
+```{r cell-52}
+ggplot2::ggplot(data = df_for_bars) +
+  ggplot2::geom_bar(mapping = aes(x = race_ethnicity_plot_label, y = percentage_estimate), stat = 'identity')
+```
+
+...we included the call `stat = 'identity'`. This `'identity'` value is an example of a [_statistical transformation_](https://r4ds.had.co.nz/data-visualisation.html#statistical-transformations). 
+
+Depending on the form your data is in, you may have to use different statistical transformations on your data in order to get the desired metrics you want. For example, if you had _individual-level_ data, where each row represented for example one individual person, but you wanted to get metrics about _groups of people_, you would most likely need to use a different statistical transformation. See the hyperlink above for more information.
+
+## 3.6 Position adjustments
+
+Imagine that instead of faceting to get bar plots by year, we wanted all of the plots on the same axis. We might think to try:
+```{r cell-53}
+ggplot2::ggplot(data = all_sexes_df) +
+  ggplot2::geom_bar(mapping = aes(x = year, y = percentage_estimate, fill = race_ethnicity_plot_label), stat = 'identity')
+```
+
+But that doesn't look right: the value of `Percentage` goes past 100! (Although this kind of "stacked bar" plot might be appropriate for other applications.)
+
+Let's make use of the `position` paramter of `ggplot2::geom_bar()`:
+
+```{r cell-54}
+ggplot2::ggplot(data = all_sexes_df) +
+  ggplot2::geom_bar(mapping = aes(x = year, y = percentage_estimate, fill = race_ethnicity_plot_label),
+                    stat = 'identity', position = "dodge")
+```
+
+See more about position adjustment for plot layers [here](https://ggplot2.tidyverse.org/reference/#section-layer-position-adjustment).
+
+## 3.7 Coordinate systems
+
+Instead of wanting vertical bars, we might want horizontal bars. We can do this with the [`ggplot2::coord_flip()`](https://ggplot2.tidyverse.org/reference/coord_flip.html) function:
+
+```{r cell-55}
+ggplot2::ggplot(data = df_for_bars) +
+  ggplot2::geom_bar(mapping = aes(x = race_ethnicity_plot_label, y = percentage_estimate), stat = 'identity') +
+  ggplot2::coord_flip()
+```
+
+We can also tell to make a [polar area diagram](https://en.wikipedia.org/wiki/Pie_chart#Polar_area_diagram) using the [`ggplot2::coord_polar()` ](https://ggplot2.tidyverse.org/reference/coord_polar.html) function:
+
+```{r cell-56}
+ggplot2::ggplot(data = df_for_bars) +
+  ggplot2::geom_bar(mapping = aes(x = race_ethnicity_plot_label, y = percentage_estimate), stat = 'identity') +
+  ggplot2::coord_polar()
+```
+
+
+## 3.8 Making a finalized version of a plot: titles and labels
+
+Often when we're making plots, we'll want to take care to clean up the labels and add descriptive titles. Let's turn back to the example of one of our earlier plots:
+
+```{r}
+ggplot2::ggplot(data = full_data_df) +
+  ggplot2::geom_line(mapping = aes(x = year, y = percentage_estimate)) +
+  ggplot2::facet_grid(sex_plot_label ~ race_ethnicity_plot_label)
+```
+
+This plot looks fairly clean by default: for example, we can see all of the subgroup labels in the facet headings, and the axis scales seem to be legible.
+
+What if we wanted to change our axis labels to something more descriptive, or at least make them uppercase? For the given plot, since we have both an x axis and a y axis, we can use the [`ggplot2::xlab()` and `ggplot2::ylab()` functions](https://ggplot2.tidyverse.org/reference/labs.html):
+
+```{r}
+ggplot2::ggplot(data = full_data_df) +
+  ggplot2::geom_line(mapping = aes(x = year, y = percentage_estimate)) +
+  ggplot2::facet_grid(sex_plot_label ~ race_ethnicity_plot_label) +
+  ggplot2::xlab("Year") +
+  ggplot2::ylab("Estimated high school\nnon-completion percentage\n(in percentage points)")
+```
+
+Adding a title is done in a similar way: we can use the [`ggplot2::labs()` function](https://ggplot2.tidyverse.org/reference/labs.html):
+
+```{r}
+ggplot2::ggplot(data = full_data_df) +
+  ggplot2::geom_line(mapping = aes(x = year, y = percentage_estimate)) +
+  ggplot2::facet_grid(sex_plot_label ~ race_ethnicity_plot_label) +
+  ggplot2::xlab("Year") +
+  ggplot2::ylab("Estimated high school\nnon-completion percentage\n(in percentage points)") +
+  ggplot2::labs(title = "Estimated High School Non-Completion Percentage\namong 18- to 24-year-olds",
+                subtitle = "By sex, race/ethnicity, and year, 2000-2013")
+```
+
+In our code, we can also display a caption on our image. Here, we might include notes about the provenance and limitations of our data:
+
+```{r}
+ggplot2::ggplot(data = full_data_df) +
+  ggplot2::geom_line(mapping = aes(x = year, y = percentage_estimate)) +
+  ggplot2::facet_grid(sex_plot_label ~ race_ethnicity_plot_label) +
+  ggplot2::xlab("Year") +
+  ggplot2::ylab("Estimated high school\nnon-completion percentage\n(in percentage points)") +
+  ggplot2::labs(title = "Estimated High School Non-Completion Percentage\namong 18- to 24-year-olds",
+                subtitle = "By sex, race/ethnicity, and year, 2000-2013",
+                caption = "Source: Aggregates of Current Population Survey (CPS) statistics reported by the My Brother's Keeper\n(MBK) Key Statistical Indicators on Boys and Men of Color initiative; available from data.gov.\nNOTE: data indicated by MBK to be statistically unreliable is not included in this plot")
+```
+
+In total, we've now seen how to customize our visualization and get it closer to a form that's ready to be presented to a public audience.
+

@@ -1,5 +1,8 @@
+*.DS_Store
+*/.Rapp.history
 *.Rproj
 .Rproj.user
 .Rhistory
 .RData
 .Ruserdata
+inst/doc
