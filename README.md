@@ -22,6 +22,11 @@ remotes::install_github("civisanalytics/civis_political_r_training",
 The training materials exist as a vignette within the `civis.political.r.training` package. To view them after installing the package, run the following command in RStudio:
 
 ```r
+remotes::install_github("civisanalytics/civis_political_r_training",
+                        build = TRUE,
+                        build_vignettes = TRUE,
+                        force = TRUE,
+                        build_opts = c("--no-resave-data", "--no-manual"))
 vignette("training", package = "civis.political.r.training")
 ```
 
